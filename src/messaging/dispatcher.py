@@ -10,6 +10,7 @@ from src.messaging.whatsapp import WhatsAppAdapter
 from src.health_profile.crud import get_profile
 from src.health_profile.models import User, Message
 from src.llm.client import get_llm_client, ChatMessage
+from src.llm.emergency import check_emergency
 from src.auth.consent import has_consent
 from src.health_profile.models import ConsentType
 from src.health_profile.encryption import encrypt_field, decrypt_field
@@ -52,6 +53,14 @@ async def handle_inbound(
             inbound.sender_id,
             "Your consent is required before we can assist you. Please visit the app to review and accept.",
         )
+        return
+
+    # Emergency pre-filter — runs before LLM, must not be bypassed
+    emergency_reply = check_emergency(inbound.text)
+    if emergency_reply:
+        await _store_message(db, user.id, inbound.provider.value, "inbound", inbound.text)
+        await _store_message(db, user.id, inbound.provider.value, "outbound", emergency_reply)
+        await adapter.send_message(inbound.sender_id, emergency_reply)
         return
 
     # Load history (last 10 messages)

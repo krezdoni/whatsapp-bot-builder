@@ -16,6 +16,7 @@ from src.health_profile.crud import get_profile
 from src.llm.client import get_llm_client, ChatMessage
 from src.health_profile.encryption import encrypt_field, decrypt_field
 from src.health_profile.models import Message
+from src.llm.emergency import check_emergency
 from sqlalchemy import select
 
 router = APIRouter(prefix="/messaging", tags=["messaging"])
@@ -70,6 +71,16 @@ async def pwa_chat(
     db: AsyncSession = Depends(get_db),
 ):
     """Direct chat endpoint for the PWA (no messaging channel needed)."""
+    # Emergency pre-filter — must run before LLM
+    emergency_reply = check_emergency(body.message)
+    if emergency_reply:
+        db.add(Message(user_id=user_id, direction="inbound", provider="pwa",
+                       content_enc=encrypt_field(body.message, user_id)))
+        db.add(Message(user_id=user_id, direction="outbound", provider="pwa",
+                       content_enc=encrypt_field(emergency_reply, user_id)))
+        await db.flush()
+        return ChatResponse(reply=emergency_reply)
+
     # Load history
     result = await db.execute(
         select(Message)

@@ -12,11 +12,12 @@ from src.health_profile.encryption import encrypt_field
 from src.health_profile.crud import merge_fhir_data
 from src.auth.consent import has_consent
 from src.fhir.denmark import SundhedsjournalClient
+from src.cache import cache_set, cache_get, cache_delete
 
 router = APIRouter(prefix="/fhir", tags=["fhir"])
 
-# Temporary state store — replace with Redis in production
-_pending_states: dict[str, str] = {}  # state → user_id
+# PKCE verifiers keyed by state token (must survive the round-trip to MitID)
+_PKCE_TTL = 600  # 10 minutes
 
 
 @router.get("/denmark/connect")
@@ -29,9 +30,12 @@ async def connect_denmark_fhir(
         raise HTTPException(403, "FHIR pull consent required before connecting health records.")
 
     state = secrets.token_urlsafe(32)
-    _pending_states[state] = user_id
+    await cache_set(f"oauth:state:{state}", user_id, ttl_seconds=_PKCE_TTL)
 
     client = SundhedsjournalClient()
+    # Store the PKCE verifier alongside the state so the callback can retrieve it
+    await cache_set(f"oauth:pkce:{state}", client._code_verifier, ttl_seconds=_PKCE_TTL)
+
     auth_url = await client.get_authorization_url(state)
     return {"auth_url": auth_url}
 
@@ -43,11 +47,18 @@ async def denmark_fhir_callback(
     db: AsyncSession = Depends(get_db),
 ):
     """Handle MitID OAuth callback, fetch FHIR data, merge into profile."""
-    user_id = _pending_states.pop(state, None)
+    user_id = await cache_get(f"oauth:state:{state}")
+    code_verifier = await cache_get(f"oauth:pkce:{state}")
+
+    await cache_delete(f"oauth:state:{state}")
+    await cache_delete(f"oauth:pkce:{state}")
+
     if not user_id:
         raise HTTPException(400, "Invalid or expired OAuth state.")
 
     client = SundhedsjournalClient()
+    if code_verifier:
+        client._code_verifier = code_verifier
     tokens = await client.exchange_code(code, state)
     access_token = tokens.get("access_token")
     patient_id = tokens.get("patient")

@@ -32,6 +32,7 @@ def test_threema_parse_inbound():
 def test_threema_verify_webhook_valid():
     import json
     adapter = ThreemaAdapter()
+    adapter._secret = "test-secret-threema"  # bypass lru_cache ordering in test suite
     payload = json.dumps({"secret": "test-secret-threema", "from": "*X", "text": "hi"}).encode()
     assert adapter.verify_webhook(payload, {}) is True
 
@@ -39,6 +40,7 @@ def test_threema_verify_webhook_valid():
 def test_threema_verify_webhook_invalid():
     import json
     adapter = ThreemaAdapter()
+    adapter._secret = "test-secret-threema"
     payload = json.dumps({"secret": "wrong-secret", "from": "*X", "text": "hi"}).encode()
     assert adapter.verify_webhook(payload, {}) is False
 
