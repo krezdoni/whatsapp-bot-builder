@@ -31,7 +31,7 @@ export async function GET(request) {
   const { searchParams } = new URL(request.url)
   const limit = searchParams.get('limit') ?? '50'
 
-  const authHeaders = COOKIE ? { Cookie: `substack.sid=${COOKIE}` } : {}
+  const authHeaders = COOKIE ? { Cookie: `connect.sid=${COOKIE}` } : {}
 
   try {
     // Public post list (no auth needed for public newsletters)
