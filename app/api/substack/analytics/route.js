@@ -1,7 +1,13 @@
 import { NextResponse } from 'next/server'
 
-const PUB = process.env.SUBSTACK_PUBLICATION // e.g. "nicco" from nicco.substack.com
-const COOKIE = process.env.SUBSTACK_SESSION_COOKIE // substack.sid value (optional — enables open/click stats)
+// Accepts either a custom domain ("letters.niccokrezdorn.com")
+// or a bare subdomain ("nicco" → nicco.substack.com)
+const RAW = process.env.SUBSTACK_PUBLICATION
+const HOST = RAW
+  ? RAW.includes('.') ? RAW : `${RAW}.substack.com`
+  : null
+
+const COOKIE = process.env.SUBSTACK_SESSION_COOKIE
 
 function normalize(post, stats) {
   return {
@@ -9,8 +15,7 @@ function normalize(post, stats) {
     platform: 'substack',
     content: post.title ?? post.subtitle ?? '',
     publishedAt: post.post_date ?? post.updated_at ?? '',
-    url: post.canonical_url ?? (PUB ? `https://${PUB}.substack.com/p/${post.slug}` : ''),
-    // With cookie: opens = email opens; without: fall back to page views or 0
+    url: post.canonical_url ?? (HOST ? `https://${HOST}/p/${post.slug}` : ''),
     views: stats?.views ?? stats?.opens ?? post.views ?? 0,
     likes: stats?.reactions ?? post.reaction_count ?? 0,
     comments: stats?.comments ?? post.comment_count ?? 0,
@@ -26,7 +31,7 @@ function normalize(post, stats) {
 }
 
 export async function GET(request) {
-  if (!PUB) return NextResponse.json({ posts: [] })
+  if (!HOST) return NextResponse.json({ posts: [] })
 
   const { searchParams } = new URL(request.url)
   const limit = searchParams.get('limit') ?? '50'
@@ -34,20 +39,18 @@ export async function GET(request) {
   const authHeaders = COOKIE ? { Cookie: `connect.sid=${COOKIE}` } : {}
 
   try {
-    // Public post list (no auth needed for public newsletters)
     const postsRes = await fetch(
-      `https://${PUB}.substack.com/api/v1/posts?sort=new&limit=${limit}&type=newsletter`,
+      `https://${HOST}/api/v1/posts?sort=new&limit=${limit}&type=newsletter`,
       { headers: authHeaders, next: { revalidate: 3600 } }
     )
     if (!postsRes.ok) return NextResponse.json({ posts: [], error: `Substack ${postsRes.status}` })
     const rawPosts = await postsRes.json()
     const postList = Array.isArray(rawPosts) ? rawPosts : (rawPosts.posts ?? [])
 
-    // Try to pull detailed stats if session cookie is available
     let statsById = {}
     if (COOKIE) {
       const statsRes = await fetch(
-        `https://${PUB}.substack.com/api/v1/post_stats`,
+        `https://${HOST}/api/v1/post_stats`,
         { headers: authHeaders, next: { revalidate: 300 } }
       ).catch(() => null)
       if (statsRes?.ok) {
