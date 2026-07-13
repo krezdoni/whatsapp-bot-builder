@@ -1,10 +1,9 @@
 import { NextResponse } from 'next/server'
 
-// Which platforms are configured
 const CONFIG = {
-  linkedin: !!process.env.AUTHOREDUP_API_KEY,
-  instagram: !!process.env.ZERNIO_API_KEY,
-  twitter: !!process.env.ZERNIO_API_KEY,
+  linkedin: !!process.env.ZERNIO_API_KEY,
+  instagram: !!process.env.INSTAGRAM_ACCESS_TOKEN,
+  twitter: false, // via CSV upload only
   substack: !!process.env.SUBSTACK_PUBLICATION,
 }
 
@@ -24,14 +23,13 @@ export async function GET(request) {
   const to = searchParams.get('to') ?? ''
   const qs = `from=${from}&to=${to}&limit=100`
 
-  const [li, ig, tw, sub] = await Promise.all([
+  const [li, ig, sub] = await Promise.all([
     CONFIG.linkedin ? safeFetch(`${origin}/api/linkedin/analytics?${qs}`) : [],
-    CONFIG.instagram ? safeFetch(`${origin}/api/instagram/analytics?${qs}`) : [],
-    CONFIG.twitter ? safeFetch(`${origin}/api/twitter/analytics?${qs}`) : [],
+    CONFIG.instagram ? safeFetch(`${origin}/api/instagram/analytics`) : [],
     CONFIG.substack ? safeFetch(`${origin}/api/substack/analytics?limit=50`) : [],
   ])
 
-  const posts = [...li, ...ig, ...tw, ...sub].sort(
+  const posts = [...li, ...ig, ...sub].sort(
     (a, b) => new Date(b.publishedAt) - new Date(a.publishedAt)
   )
 

@@ -1,43 +1,72 @@
 import { NextResponse } from 'next/server'
 
-const BASE = process.env.ZERNIO_API_BASE ?? 'https://zernio.com/api'
+// Instagram Graph API — reads your own posts natively (no posting-through-Zernio needed)
+// Requires: INSTAGRAM_ACCESS_TOKEN (long-lived user token from Meta Developer)
+// Setup guide shown in the dashboard when token is missing.
+const TOKEN = process.env.INSTAGRAM_ACCESS_TOKEN
+const BASE = 'https://graph.instagram.com'
 
-function normalize(post) {
-  const li = post.platformAnalytics?.find((p) => p.platform === 'instagram')
-  const a = li?.analytics ?? post.analytics ?? {}
+const FIELDS = [
+  'id', 'caption', 'timestamp', 'media_type', 'permalink',
+  'like_count', 'comments_count',
+].join(',')
+
+const INSIGHTS_METRICS = 'impressions,reach,saved'
+
+function normalize(post, insights) {
+  const m = {}
+  insights?.data?.forEach((d) => { m[d.name] = d.values?.[0]?.value ?? d.value ?? 0 })
   return {
-    id: String(post.postId ?? post.latePostId ?? ''),
+    id: String(post.id ?? ''),
     platform: 'instagram',
-    content: post.content ?? '',
-    publishedAt: post.publishedAt ?? '',
-    url: li?.platformPostUrl ?? '',
-    views: a.impressions ?? a.views ?? 0,
-    likes: a.likes ?? 0,
-    comments: a.comments ?? 0,
-    shares: a.shares ?? 0,
-    saves: a.saves ?? 0,
-    engagementRate: a.engagementRate ?? 0,
+    content: post.caption ?? '',
+    publishedAt: post.timestamp ?? '',
+    url: post.permalink ?? '',
+    views: m.impressions ?? 0,
+    likes: post.like_count ?? 0,
+    comments: post.comments_count ?? 0,
+    shares: 0,
+    saves: m.saved ?? 0,
+    engagementRate: m.reach > 0
+      ? ((post.like_count ?? 0) + (post.comments_count ?? 0) + (m.saved ?? 0)) / m.reach
+      : 0,
   }
 }
 
-export async function GET(request) {
-  const { searchParams } = new URL(request.url)
-  const params = new URLSearchParams({ platform: 'instagram' })
-  for (const [k, v] of searchParams.entries()) params.set(k, v)
+export async function GET() {
+  if (!TOKEN) return NextResponse.json({ posts: [], missingToken: true })
 
   try {
-    const res = await fetch(`${BASE}/v1/analytics?${params}`, {
-      headers: { Authorization: `Bearer ${process.env.ZERNIO_API_KEY}` },
-      next: { revalidate: 300 },
-    })
-    if (!res.ok) {
-      const text = await res.text()
-      return NextResponse.json({ error: text, posts: [] }, { status: res.status })
+    // 1. Fetch media list
+    const mediaRes = await fetch(
+      `${BASE}/me/media?fields=${FIELDS}&limit=50&access_token=${TOKEN}`,
+      { next: { revalidate: 300 } }
+    )
+    if (!mediaRes.ok) {
+      const err = await mediaRes.json()
+      return NextResponse.json({ posts: [], error: err?.error?.message ?? mediaRes.status })
     }
-    const data = await res.json()
-    const posts = (data.data ?? data.posts ?? []).map(normalize)
-    return NextResponse.json({ posts })
+    const mediaData = await mediaRes.json()
+    const items = mediaData.data ?? []
+
+    // 2. Fetch insights for each post (parallel, skip errors for non-image types)
+    const withInsights = await Promise.all(
+      items.map(async (post) => {
+        try {
+          const iRes = await fetch(
+            `${BASE}/${post.id}/insights?metric=${INSIGHTS_METRICS}&access_token=${TOKEN}`,
+            { next: { revalidate: 300 } }
+          )
+          const insights = iRes.ok ? await iRes.json() : null
+          return normalize(post, insights)
+        } catch {
+          return normalize(post, null)
+        }
+      })
+    )
+
+    return NextResponse.json({ posts: withInsights })
   } catch (e) {
-    return NextResponse.json({ error: e.message, posts: [] }, { status: 500 })
+    return NextResponse.json({ posts: [], error: e.message })
   }
 }

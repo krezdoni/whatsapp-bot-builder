@@ -258,9 +258,57 @@ function PlatformSummaryBar({ posts, activePlatforms }) {
   )
 }
 
+// ─── CSV Uploader ─────────────────────────────────────────────────────────────
+
+function CsvUploader({ onImport }) {
+  const [status, setStatus] = useState(null) // null | 'uploading' | 'ok' | 'error'
+  const [message, setMessage] = useState('')
+
+  async function handleFile(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setStatus('uploading')
+    setMessage('')
+    const form = new FormData()
+    form.append('file', file)
+    try {
+      const res = await fetch('/api/csv', { method: 'POST', body: form })
+      const data = await res.json()
+      if (!res.ok || data.error) {
+        setStatus('error')
+        setMessage(data.error ?? 'Upload failed')
+      } else {
+        setStatus('ok')
+        setMessage(`Imported ${data.count} ${data.platform === 'twitter' ? 'X' : 'LinkedIn'} posts`)
+        onImport(data.posts, data.platform)
+      }
+    } catch (err) {
+      setStatus('error')
+      setMessage(err.message)
+    }
+    e.target.value = ''
+  }
+
+  return (
+    <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+      <label className="flex items-center gap-2 px-3 py-2 bg-slate-700 hover:bg-slate-600 border border-slate-600 rounded-lg text-xs font-medium cursor-pointer transition">
+        <svg className="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+        </svg>
+        Upload X / LinkedIn CSV
+        <input type="file" accept=".csv" className="hidden" onChange={handleFile} />
+      </label>
+      {status === 'uploading' && <span className="text-slate-500 text-xs">Importing…</span>}
+      {status === 'ok' && <span className="text-emerald-400 text-xs">{message}</span>}
+      {status === 'error' && <span className="text-red-400 text-xs">{message}</span>}
+    </div>
+  )
+}
+
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
 
 const PAGE_SIZE = 15
+const CSV_STORAGE_KEY = 'dashboard_csv_posts'
 
 export default function Dashboard() {
   const [range, setRange] = useState('30')
@@ -268,11 +316,35 @@ export default function Dashboard() {
   const [sortMetric, setSortMetric] = useState('views')
   const [page, setPage] = useState(1)
 
-  const [allPosts, setAllPosts] = useState([])
+  const [apiPosts, setApiPosts] = useState([])
+  const [csvPosts, setCsvPosts] = useState([])
   const [configuredPlatforms, setConfiguredPlatforms] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [lastRefresh, setLastRefresh] = useState(null)
+
+  // Persist CSV posts in localStorage so they survive page reload
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(CSV_STORAGE_KEY)
+      if (stored) setCsvPosts(JSON.parse(stored))
+    } catch {}
+  }, [])
+
+  function handleCsvImport(posts, platform) {
+    setCsvPosts((prev) => {
+      // Replace all posts for this platform, keep others
+      const kept = prev.filter((p) => p.platform !== platform)
+      const next = [...kept, ...posts]
+      try { localStorage.setItem(CSV_STORAGE_KEY, JSON.stringify(next)) } catch {}
+      return next
+    })
+  }
+
+  const allPosts = useMemo(
+    () => [...apiPosts, ...csvPosts].sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt)),
+    [apiPosts, csvPosts]
+  )
 
   const fetchAll = useCallback(async () => {
     setLoading(true)
@@ -283,7 +355,7 @@ export default function Dashboard() {
       const res = await fetch(`/api/posts?from=${from}&to=${to}`)
       if (!res.ok) throw new Error(`${res.status}`)
       const data = await res.json()
-      setAllPosts(data.posts ?? [])
+      setApiPosts(data.posts ?? [])
       setConfiguredPlatforms(
         Object.entries(data.config ?? {})
           .filter(([, v]) => v)
@@ -299,6 +371,12 @@ export default function Dashboard() {
 
   useEffect(() => { fetchAll() }, [fetchAll])
   useEffect(() => { setPage(1) }, [activePlatform, sortMetric])
+
+  // Include CSV-sourced platforms in the tab list
+  const allConfiguredPlatforms = useMemo(() => {
+    const csv = [...new Set(csvPosts.map((p) => p.platform))]
+    return [...new Set([...configuredPlatforms, ...csv])]
+  }, [configuredPlatforms, csvPosts])
 
   // ── Filter + sort ──────────────────────────────────────────────────────────
   const visiblePosts = useMemo(() => {
@@ -327,21 +405,21 @@ export default function Dashboard() {
   )
 
   const activePlatformsForChart = activePlatform === 'all'
-    ? configuredPlatforms
+    ? allConfiguredPlatforms
     : [activePlatform]
 
   // ── Platform comparison bar data ───────────────────────────────────────────
   const comparisonData = useMemo(() => {
     return METRICS.map(({ key, short }) => {
       const row = { metric: short }
-      configuredPlatforms.forEach((pl) => {
+      allConfiguredPlatforms.forEach((pl) => {
         row[pl] = allPosts.filter((p) => p.platform === pl).reduce((s, p) => s + (p[key] ?? 0), 0)
       })
       return row
     })
-  }, [allPosts, configuredPlatforms])
+  }, [allPosts, allConfiguredPlatforms])
 
-  const tabPlatforms = ['all', ...configuredPlatforms]
+  const tabPlatforms = ['all', ...allConfiguredPlatforms]
 
   return (
     <div className="min-h-screen bg-slate-900 text-white">
@@ -407,23 +485,60 @@ export default function Dashboard() {
 
       <main className="max-w-7xl mx-auto px-6 py-7 space-y-6">
 
-        {/* ── Setup notice ─────────────────────────────────────────────────── */}
-        {!loading && configuredPlatforms.length === 0 && (
-          <div className="bg-amber-950/50 border border-amber-500/40 rounded-xl p-5 text-sm">
-            <p className="font-semibold text-amber-300 mb-2">No platforms connected yet</p>
-            <p className="text-amber-400/80 mb-3">Add your API keys to <code className="bg-amber-900/50 px-1 rounded">.env.local</code> and restart:</p>
-            <pre className="text-amber-300/70 text-xs leading-relaxed bg-amber-950/50 rounded-lg p-3 overflow-x-auto">{`# LinkedIn (AuthoredUp — authoredup.com → Account → Generate key)
-AUTHOREDUP_API_KEY=your_key_here
+        {/* ── Setup panels ─────────────────────────────────────────────────── */}
+        <div className="space-y-3">
 
-# Instagram + X (your existing Zernio key)
-ZERNIO_API_KEY=sk_your_zernio_key_here
+          {/* Instagram setup (needs token) */}
+          {!configuredPlatforms.includes('instagram') && (
+            <div className="bg-pink-950/40 border border-pink-500/30 rounded-xl p-4 text-sm">
+              <p className="font-semibold text-pink-300 mb-1">Connect Instagram (free)</p>
+              <p className="text-pink-400/70 text-xs mb-2">Reads all your native posts — impressions, reach, likes, saves.</p>
+              <ol className="text-pink-300/70 text-xs space-y-1 list-decimal ml-4 mb-3">
+                <li>Go to <strong>developers.facebook.com</strong> → Create App → Consumer</li>
+                <li>Add <strong>Instagram Graph API</strong> product to the app</li>
+                <li>Connect your Instagram Business/Creator account</li>
+                <li>Generate a User Access Token with <code className="bg-pink-900/40 px-1 rounded">instagram_basic, read_insights</code> scopes</li>
+                <li>Exchange for a long-lived token (60 days) via the Token Debugger</li>
+                <li>Add to <code className="bg-pink-900/40 px-1 rounded">.env.local</code>: <code className="bg-pink-900/40 px-1 rounded">INSTAGRAM_ACCESS_TOKEN=your_token</code></li>
+              </ol>
+              <p className="text-pink-400/50 text-xs">Your account must be a Business or Creator account (not personal).</p>
+            </div>
+          )}
 
-# Substack (your subdomain, e.g. "nicco" from nicco.substack.com)
-SUBSTACK_PUBLICATION=yourpublication
-# Optional: substack.sid cookie value → enables open rates & clicks
-SUBSTACK_SESSION_COOKIE=`}</pre>
+          {/* CSV upload for X + LinkedIn native posts */}
+          <div className="bg-slate-800 border border-slate-700 rounded-xl p-4">
+            <p className="font-semibold text-slate-300 text-sm mb-1">Import X &amp; LinkedIn posts via CSV</p>
+            <p className="text-slate-500 text-xs mb-3">
+              Since you post natively, export your analytics CSV and upload it here. Posts persist across reloads.
+            </p>
+            <div className="grid sm:grid-cols-2 gap-3 text-xs text-slate-500 mb-4">
+              <div className="bg-slate-700/50 rounded-lg p-3">
+                <p className="text-white font-medium mb-1 flex items-center gap-1.5">
+                  {P.twitter.icon} X Analytics
+                </p>
+                <p>analytics.twitter.com/about → <strong>Export data</strong> → Tweet activity → select date range → Export</p>
+              </div>
+              <div className="bg-slate-700/50 rounded-lg p-3">
+                <p className="text-white font-medium mb-1 flex items-center gap-1.5">
+                  {P.linkedin.icon} LinkedIn Analytics
+                </p>
+                <p>linkedin.com/analytics/creator/content → <strong>Export</strong> button (top right)</p>
+              </div>
+            </div>
+            <CsvUploader onImport={handleCsvImport} />
+            {csvPosts.length > 0 && (
+              <p className="text-slate-600 text-xs mt-2">
+                {csvPosts.length} posts loaded from CSV
+                <button
+                  onClick={() => { setCsvPosts([]); localStorage.removeItem(CSV_STORAGE_KEY) }}
+                  className="ml-3 text-red-500/60 hover:text-red-400 transition"
+                >
+                  Clear
+                </button>
+              </p>
+            )}
           </div>
-        )}
+        </div>
 
         {/* ── Error banner ─────────────────────────────────────────────────── */}
         {error && (
@@ -446,10 +561,10 @@ SUBSTACK_SESSION_COOKIE=`}</pre>
         </div>
 
         {/* ── Per-platform breakdown ───────────────────────────────────────── */}
-        {!loading && configuredPlatforms.length > 1 && activePlatform === 'all' && (
+        {!loading && allConfiguredPlatforms.length > 1 && activePlatform === 'all' && (
           <PlatformSummaryBar
             posts={allPosts}
-            activePlatforms={configuredPlatforms}
+            activePlatforms={allConfiguredPlatforms}
           />
         )}
 
@@ -502,7 +617,7 @@ SUBSTACK_SESSION_COOKIE=`}</pre>
             <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-4">
               Platform comparison
             </h2>
-            {configuredPlatforms.length > 0 && !loading ? (
+            {allConfiguredPlatforms.length > 0 && !loading ? (
               <ResponsiveContainer width="100%" height={200}>
                 <BarChart
                   data={comparisonData}
@@ -513,7 +628,7 @@ SUBSTACK_SESSION_COOKIE=`}</pre>
                   <XAxis type="number" tick={{ fill: '#475569', fontSize: 9 }} tickFormatter={fmt} tickLine={false} axisLine={false} />
                   <YAxis type="category" dataKey="metric" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={48} />
                   <Tooltip content={<ChartTooltip />} />
-                  {configuredPlatforms.map((pl) => (
+                  {allConfiguredPlatforms.map((pl) => (
                     <Bar key={pl} dataKey={pl} fill={P[pl]?.color ?? '#64748b'} radius={[0, 3, 3, 0]} />
                   ))}
                 </BarChart>
